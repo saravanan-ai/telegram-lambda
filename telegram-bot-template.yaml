@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Telegram bot to start stop EC2 instances"
+
+Parameters:
+  EC2:
+    NoEcho: 'false'
+    Type: String
+    Description: List of EC2 instances
+    ConstraintDescription: separated by comma ,
+      
+  Telegram:
+    NoEcho: 'false'
+    Type: String
+    Description: Telegram API Key
+    ConstraintDescription: get it from bot father            
+
+Resources:
+  lambdaFunction:
+    Type: "AWS::Lambda::Function"
+    DeletionPolicy: Retain
+    Properties:
+      Code:
+        ZipFile: |        
+        
+            import json
+            import requests
+            import os, boto3, time
+
+            instance = os.environ.get('Instance_ID')
+            BOT_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+            ec2 = boto3.client('ec2', region_name='us-east-1')
+
+            def lambda_handler(event, context):
+                try:
+                    request_body = json.loads(event['body'])
+                    print (request_body)
+                    command3 = request_body['message']['text']
+                    print (command3)
+                    if command3.lower()  == 'stop':
+                        ec2.stop_instances(InstanceIds=instance.split(','))
+                    if command3.lower()  == 'start':
+                        ec2.start_instances(InstanceIds=instance.split(','))
+                        time.sleep(30)
+                        response = ec2.describe_instances(InstanceIds=instance.split(','))
+                        public_ip = response['Reservations'][0]['Instances'][0]['PublicIpAddress']
+                        n_public_ip = 'ec2-' + public_ip + '.compute-1.amazonaws.com'
+                        BOT_CHAT_ID = request_body['message']['chat']['id']
+                        send_text = 'https://api.telegram.org/bot' + BOT_TOKEN + '/sendMessage?chat_id=' + str(BOT_CHAT_ID) + '&parse_mode=HTML&text=' + n_public_ip
+                        response = requests.get(send_text)
+                        return {
+                            'statusCode': 200
+                            }
+
+                except:
+                    pass
+
+      Description: "start stop instance using telegram bot"
+      FunctionName: !Sub ${AWS::StackName}
+      Handler: "index.lambda_handler"
+      MemorySize: 128
+      Role: !GetAtt "lambdaIAMRole.Arn"
+      Runtime: "python3.10"
+      Timeout: 90
+      Environment:
+        Variables:
+          Instance_ID: !Ref 'EC2'
+          TELEGRAM_TOKEN: !Ref 'Telegram'
+      Layers: 
+        - "arn:aws:lambda:<your-region>:<your-account-id>:layer:requests-layer:<version-number>"      #####(<<Create custom layer for request in lambda and use that ARN>>)
+                           
+  lambdaIAMRole:
+    Type: "AWS::IAM::Role"
+    DeletionPolicy: Retain
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action:
+              - "sts:AssumeRole"
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+      Path: "/"
+      Policies:
+        - PolicyName: "FunctionURLAllowPublicAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:*
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::AccountId}"
+              - Effect: "Allow"
+                Action: logs:*
+                Resource: arn:aws:logs:*:*:*
+              - Effect: "Allow"
+                Action: ec2:*
+                Resource: "*"                
+
+  permissionForURLInvoke:
+   DependsOn: "lambdaFunction"
+   Type: "AWS::Lambda::Permission"
+   DeletionPolicy: Retain
+   Properties:
+     FunctionName: !GetAtt lambdaFunction.Arn
+     FunctionUrlAuthType: "NONE"
+     Action: "lambda:InvokeFunctionUrl"
+     Principal: '*' 
+     
+  Myurl:
+    Type: AWS::Lambda::Url
+    DeletionPolicy: Retain
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt lambdaFunction.Arn
+
+Outputs:
+  LambdaInvokeURL:
+    Value: 
+      !Join 
+        - ''
+        - - 'https://api.telegram.org/bot'
+          - !Sub ${Telegram}
+          - '/setWebhook?url='
+          - !GetAtt Myurl.FunctionUrl
+          - '&drop_pending_updates=true'
+    Export:
+      Name: 
+        !Sub ${AWS::StackName}
